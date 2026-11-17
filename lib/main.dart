@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:background_downloader/background_downloader.dart' show FileDownloader;
@@ -19,8 +20,14 @@ Future<void> main() async {
   IncomingShares.instance.start();
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
   final prefs = await SharedPreferences.getInstance();
-  await _initOnDeviceAi();
+  // Show the UI first. The on-device AI engine is optional, so it starts in the
+  // background and can never block (or crash) app start-up.
   runApp(ProviderScope(overrides: [prefsProvider.overrideWithValue(prefs)], child: const PcktApp()));
+  unawaited(_initOnDeviceAi().timeout(const Duration(seconds: 20), onTimeout: () {
+    debugPrint('On-device AI init timed out; continuing without it');
+  }).catchError((Object e) {
+    debugPrint('On-device AI init failed: $e');
+  }));
 }
 
 /// Registers the LiteRT-LM engine for on-device Gemma. A failure only
