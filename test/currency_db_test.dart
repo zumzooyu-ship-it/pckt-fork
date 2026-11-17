@@ -278,7 +278,7 @@ void main() {
     test('CSV has the currency columns, with per-currency decimals', () async {
       final rows = decodeCsv(await DataExport(db).transactionsCsv());
       final h = rows.first;
-      expect(h.sublist(h.length - 3), ['currency', 'converted_amount', 'converted_currency']);
+      expect(h.sublist(h.length - 6, h.length - 3), ['currency', 'converted_amount', 'converted_currency']);
       final byCurrency = {for (final r in rows.skip(1)) r[h.indexOf('currency')]: r};
       expect(byCurrency['USD']![1], '12.50');
       expect(byCurrency['USD']![h.indexOf('converted_amount')], '1045.30');

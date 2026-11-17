@@ -62,6 +62,10 @@ class DataExport {
     'currency',
     'converted_amount',
     'converted_currency',
+    // Added in schema v5; appended so older column positions still hold.
+    'type',
+    'settled_amount',
+    'your_share',
   ];
 
   // ------------------------------------------------------------------ CSV
@@ -103,6 +107,15 @@ class DataExport {
               ? ''
               : plainAmount(t.convertedMinor!, t.convertedCurrency!),
           t.convertedMinor == null ? '' : t.convertedCurrency ?? '',
+          t.isTransfer
+              ? 'transfer'
+              : t.direction == TxnDirection.credit
+              ? 'income'
+              : 'expense',
+          t.linkedMinor > 0 ? plainAmount(t.linkedMinor, t.currency) : '',
+          t.linkedMinor > 0 && t.direction == TxnDirection.debit && !t.isTransfer
+              ? plainAmount(t.amountMinor - t.linkedMinor, t.currency)
+              : '',
         ],
     ];
     return encodeCsv(rows);

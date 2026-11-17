@@ -6,7 +6,9 @@ import 'package:go_router/go_router.dart';
 import 'core/theme/app_theme.dart';
 import 'features/activity/activity_screen.dart';
 import 'features/assistant/assistant_screen.dart';
+import 'features/bills/bills_screen.dart';
 import 'features/budgets/budgets_screen.dart';
+import 'features/templates/templates_screen.dart';
 import 'features/dashboard/dashboard_screen.dart';
 import 'features/insights/insights_screen.dart';
 import 'features/lock/app_lock_gate.dart';
@@ -21,6 +23,7 @@ import 'features/settings/messages_screen.dart';
 import 'features/settings/settings_screen.dart';
 import 'features/shell/home_shell.dart';
 import 'providers.dart';
+import 'providers_extra.dart';
 
 final _routerProvider = Provider<GoRouter>((ref) {
   return GoRouter(
@@ -42,6 +45,8 @@ final _routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: '/email/connect', builder: (_, _) => const EmailConnectScreen()),
       GoRoute(path: '/llm', builder: (_, _) => const LlmSettingsScreen()),
       GoRoute(path: '/budgets', builder: (_, _) => const BudgetsScreen()),
+      GoRoute(path: '/bills', builder: (_, _) => const BillsScreen()),
+      GoRoute(path: '/templates', builder: (_, _) => const TemplatesScreen()),
       GoRoute(path: '/recurring', builder: (_, _) => const RecurringScreen()),
       GoRoute(path: '/settings/accounts', builder: (_, _) => const AccountsScreen()),
       GoRoute(path: '/settings/categories', builder: (_, _) => const CategoriesScreen()),
@@ -87,6 +92,8 @@ class PcktApp extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     // Loads the home currency before anything formats an amount.
     ref.watch(homeCurrencyProvider);
+    // Keeps bill reminders scheduled (re-armed on every start and edit).
+    ref.watch(billRemindersProvider);
     return MaterialApp.router(
       title: 'Pckt',
       debugShowCheckedModeBanner: false,

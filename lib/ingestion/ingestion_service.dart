@@ -2,11 +2,14 @@ import 'package:drift/drift.dart';
 
 import '../core/theme/palette.dart';
 import '../data/db/database.dart';
+import '../data/db/extras.dart';
 import 'categorizer.dart';
 import 'dedup/dedup_engine.dart';
 import 'parser/email_senders.dart';
 import 'parser/parsed_txn.dart';
+import 'parser/balance_parser.dart';
 import 'parser/sms_parser.dart';
+import 'templates/template_engine.dart';
 
 class IngestReport {
   int seen = 0, added = 0, merged = 0, flagged = 0, ignored = 0, unparsed = 0;
@@ -38,9 +41,116 @@ class IngestionService {
 
   MessageParser _parserFor(SourceKind s) => parsers[s] ?? parsers[SourceKind.sms]!;
 
+  /// User-taught templates ("Teach Pckt"), tried before the built-in rules.
+  /// Loaded at the start of every ingest / re-parse.
+  List<ParserTemplate> _templates = const [];
+  final Map<int, int> _templateHits = {};
+
+  Future<void> _loadTemplates() async {
+    _templates = await db.enabledTemplates();
+    _templateHits.clear();
+  }
+
+  Future<void> _flushTemplateHits() async {
+    if (_templateHits.isEmpty) return;
+    await db.addTemplateHits(Map.of(_templateHits));
+    _templateHits.clear();
+  }
+
+  /// Templates first (the user said "this is how it looks"), then the rules.
+  ParseResult _parse(RawInput input) {
+    for (final t in _templates) {
+      final r = TemplateEngine.tryParse(t, input, home: homeCurrency);
+      if (r != null) {
+        _templateHits[t.id] = (_templateHits[t.id] ?? 0) + 1;
+        return r;
+      }
+    }
+    return _parserFor(input.source).parse(input);
+  }
+
+  /// Applies every enabled template (or just [only]) to messages that were
+  /// skipped or unreadable, turning matches into transactions. Returns how
+  /// many became (or merged into) transactions.
+  Future<int> applyTemplatesToStored({ParserTemplate? only}) async {
+    await _loadTemplates();
+    if (only != null) _templates = [only];
+    if (_templates.isEmpty) return 0;
+    final rows =
+        await (db.select(db.rawMessages)..where(
+              (m) =>
+                  m.parseStatus.isIn([ParseStatus.ignored.index, ParseStatus.pendingLlm.index]) &
+                  (m.ignoreReason.isNull() | m.ignoreReason.equals('Deleted by user').not()),
+            ))
+            .get();
+    var n = 0;
+    for (final m in rows) {
+      final input = RawInput(
+        source: m.source,
+        externalId: m.externalId,
+        sender: m.sender,
+        body: m.body,
+        receivedAt: m.receivedAt,
+      );
+      for (final t in _templates) {
+        if (TemplateEngine.tryParse(t, input, home: homeCurrency) case final Parsed p?) {
+          await applyParsed(m, p.txn);
+          _templateHits[t.id] = (_templateHits[t.id] ?? 0) + 1;
+          n++;
+          break;
+        }
+      }
+    }
+    await _flushTemplateHits();
+    return n;
+  }
+
+  // -------------------------------------------------------------- balances
+
+  /// Notes the balance a message states against the account it names.
+  /// Only accounts the message identifies (last digits) are touched.
+  Future<void> _captureBalance(RawInput input, List<Account> accounts) async {
+    final b = BalanceParser.parse(input, home: homeCurrency);
+    if (b == null || b.accountHint == null) return;
+    final account = await _accountFor(
+      ParsedTxn(
+        amountMinor: 0,
+        direction: TxnDirection.debit,
+        occurredAt: input.receivedAt,
+        mode: PaymentMode.other,
+        confidence: 1,
+        accountHint: b.accountHint,
+        institution: b.institution,
+      ),
+      input.body,
+      accounts,
+    );
+    if (account == null) return;
+    await db.applyBalance(account.id, b.minor, input.receivedAt);
+  }
+
+  /// Re-reads stored SMS/email for balances (oldest first, so the newest
+  /// message wins). Used once after upgrading, and by "Refresh balances".
+  Future<int> backfillBalances() async {
+    final rows = await (db.select(db.rawMessages)..orderBy([(m) => OrderingTerm(expression: m.receivedAt)])).get();
+    final accounts = await db.allAccounts();
+    var n = 0;
+    for (final m in rows) {
+      if (m.source == SourceKind.manual) continue;
+      final before = accounts.length;
+      await _captureBalance(
+        RawInput(source: m.source, externalId: m.externalId, sender: m.sender, body: m.body, receivedAt: m.receivedAt),
+        accounts,
+      );
+      if (accounts.length >= before) n++;
+    }
+    return n;
+  }
+
   Future<IngestReport> ingest(List<RawInput> inputs) async {
     final report = IngestReport();
     if (inputs.isEmpty) return report;
+    await _loadTemplates();
 
     final known = <SourceKind, Set<String>>{};
     for (final s in inputs.map((i) => i.source).toSet()) {
@@ -63,6 +173,7 @@ class IngestionService {
         }
       });
     }
+    await _flushTemplateHits();
     return report;
   }
 
@@ -80,7 +191,8 @@ class IngestionService {
           mergeScore: Value(score),
         );
 
-    switch (_parserFor(input.source).parse(input)) {
+    await _captureBalance(input, accounts);
+    switch (_parse(input)) {
       case Ignored(:final reason):
         report.ignored++;
         await db.into(db.rawMessages).insert(raw(ParseStatus.ignored, reason: reason), mode: InsertMode.insertOrIgnore);
@@ -114,6 +226,7 @@ class IngestionService {
   /// don't parse are left exactly as they were. Returns how many became
   /// (or merged into) transactions.
   Future<int> reparseSkipped() async {
+    await _loadTemplates();
     final rows =
         await (db.select(db.rawMessages)..where(
               (m) =>
@@ -132,7 +245,7 @@ class IngestionService {
         body: m.body,
         receivedAt: m.receivedAt,
       );
-      if (_parserFor(m.source).parse(input) case Parsed(:final txn)) {
+      if (_parse(input) case Parsed(:final txn)) {
         await applyParsed(m, txn);
         n++;
       }
@@ -329,7 +442,10 @@ class IngestionService {
   }
 
   /// Finds or auto-creates the account a message refers to (by last 4 digits).
-  Future<Account?> _resolveAccount(ParsedTxn t, String body, List<Account> accounts) async {
+  Future<Account?> _resolveAccount(ParsedTxn t, String body, List<Account> accounts) =>
+      _accountFor(t, body, accounts);
+
+  Future<Account?> _accountFor(ParsedTxn t, String body, List<Account> accounts) async {
     final hint = t.accountHint;
     if (hint == null) return null;
     for (final a in accounts) {
@@ -349,6 +465,7 @@ class IngestionService {
       color: Palette.categories[(accounts.length * 5 + 6) % Palette.categories.length].toARGB32(),
       archived: false,
       currency: homeCurrency,
+      balanceManual: false,
     );
     final id = await db.into(db.accounts).insert(account.toCompanion(true).copyWith(id: const Value.absent()));
     final created = account.copyWith(id: id);
@@ -375,5 +492,6 @@ class IngestionService {
         categoryId: transferCategory == null ? const Value.absent() : Value(transferCategory),
       ),
     );
+    await db.pairTransfer(id, other.id);
   }
 }

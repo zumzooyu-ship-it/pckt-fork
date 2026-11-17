@@ -1,13 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../core/currency.dart';
 import '../../core/theme/icons.dart';
 import '../../core/theme/palette.dart';
 import '../../data/db/database.dart';
 import '../../providers.dart';
 import '../../ui/currency_picker.dart';
 import '../../ui/widgets.dart';
+import '../accounts/balances_card.dart';
+import '../../core/format.dart';
 import 'manage_widgets.dart';
 
 /// Every account, archived ones included.
@@ -37,7 +38,34 @@ class AccountsScreen extends ConsumerWidget {
                   if (a.last4 != null && a.last4!.isNotEmpty) '••${a.last4}',
                 ].join('  ·  '),
               ),
-              trailing: const Icon(PhosphorIconsBold.caretRight, size: 16),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  InkWell(
+                    borderRadius: BorderRadius.circular(10),
+                    onTap: () => showBalanceDialog(context, ref, a),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [
+                          Text(
+                            a.balanceMinor == null ? 'Set balance' : money(a.balanceMinor!, currency: a.currency),
+                            style: context.text.labelLarge?.copyWith(
+                              fontWeight: FontWeight.w700,
+                              color: a.balanceMinor == null ? Palette.violet : null,
+                            ),
+                          ),
+                          if (a.balanceAt != null)
+                            Text(balanceAsOf(a), style: context.text.labelSmall?.copyWith(color: context.colors.onSurfaceVariant)),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const Icon(PhosphorIconsBold.caretRight, size: 16),
+                ],
+              ),
               onTap: () => showAccountEditor(context, account: a),
             ),
         ],

@@ -81,7 +81,7 @@ class SmsParser implements MessageParser {
 
   static final _refKeyed = RegExp(
     r'(?:upi\s*(?:ref(?:erence)?|txn|transaction)?\s*(?:no\.?|id|#)?|ref(?:erence)?\s*(?:no\.?|number|id|#)?|'
-    r'rrn|utr\s*(?:no\.?)?|txn\s*(?:id|no\.?)|imps\s*(?:ref)?\s*(?:no\.?)?)\s*[:\-.]?\s*([a-z0-9]{10,22})\b',
+    r'rrn|utr\s*(?:no\.?)?|txn\s*(?:id|no\.?)|imps\s*(?:ref)?\s*(?:no\.?)?|mob\s*bk\s*ref\s*no\.?|by\s+mb)\s*[:\-.]?\s*([a-z0-9]{10,22})\b',
   );
   static final _upiPath = RegExp(r'upi/(?:p2[ma]|cr|dr)/(\d{9,16})/([^/\n]+)', caseSensitive: false);
   static final _bare12 = RegExp(r'(?<![\d*x])(\d{12})(?!\d)');
@@ -90,6 +90,7 @@ class SmsParser implements MessageParser {
 
   /// Ordered, most specific first. Group 1 is the counterparty.
   static final _debitParty = <RegExp>[
+    RegExp(r'\bfvg?\s*[:.]\s*([^,.\n]{2,40})', caseSensitive: false), // Union Bank Fv.Shree / Fvg: Name
     RegExp(r';\s*([^.;\n]{2,40}?)\s+credited', caseSensitive: false), // ICICI: "...; SWIGGY credited."
     RegExp(r'\btrf to\s+(.{2,40}?)\s+(?:ref|refno|upi)', caseSensitive: false), // SBI
     RegExp(

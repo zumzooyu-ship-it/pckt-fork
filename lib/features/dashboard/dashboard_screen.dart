@@ -9,6 +9,7 @@ import '../../core/theme/palette.dart';
 import '../../providers.dart';
 import '../../ui/widgets.dart';
 import '../activity/transaction_sheet.dart';
+import '../accounts/balances_card.dart';
 import '../budgets/budget_widgets.dart';
 import '../stats.dart';
 import 'category_donut.dart';
@@ -54,6 +55,8 @@ class DashboardScreen extends ConsumerWidget {
                           ],
                           if (!sync.enabled && list.isEmpty) ...[const SizedBox(height: 12), const _ConnectSmsCard()],
                           const SizedBox(height: 20),
+                          const UpcomingBillsCard(),
+                          const BalancesCard(),
                           if (stats.categories.isNotEmpty) ...[
                             const SectionHeader('Where it went'),
                             CategoryDonutCard(stats: stats),

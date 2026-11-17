@@ -29,6 +29,16 @@ class Accounts extends Table {
 
   /// ISO 4217 code the account is held in. Rows from before v4 are INR.
   TextColumn get currency => text().withDefault(const Constant('INR'))();
+
+  /// Last known balance in minor units of [currency], taken from the most
+  /// recent bank message that stated one (or typed in by the user).
+  IntColumn get balanceMinor => integer().nullable()();
+
+  /// When that balance was true: the time of the message it came from.
+  DateTimeColumn get balanceAt => dateTime().nullable()();
+
+  /// True when the user typed [balanceMinor] in rather than an SMS stating it.
+  BoolColumn get balanceManual => boolean().withDefault(const Constant(false))();
 }
 
 class Categories extends Table {
@@ -85,6 +95,14 @@ class Transactions extends Table {
   /// Set when dedup found a borderline match the user should confirm.
   IntColumn get duplicateOfId => integer().nullable()();
   DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+
+  /// Part of this amount that is accounted for by [TxnLinks]: for a payment,
+  /// what friends paid back; for a credit, how much of it was a repayment
+  /// (not income). Totals use `amount − linkedMinor` (see `TxnMoney`).
+  IntColumn get linkedMinor => integer().withDefault(const Constant(0))();
+
+  /// The other leg of a self-transfer (debit ↔ credit), when known.
+  IntColumn get transferPairId => integer().nullable()();
 }
 
 /// Every SMS / email we have looked at, parsed or not. Keeping the raw
@@ -134,4 +152,62 @@ class MerchantRules extends Table {
   IntColumn get id => integer().autoIncrement()();
   TextColumn get pattern => text().unique()();
   IntColumn get categoryId => integer().references(Categories, #id, onDelete: KeyAction.cascade)();
+}
+
+/// A message format the user taught the app ("Teach Pckt"). Tried before the
+/// built-in parser. [specJson] is a `TemplateSpec` (see
+/// `ingestion/templates/template_engine.dart`); [sampleBody] is the message it
+/// was taught from, so the template can be re-opened and edited.
+class ParserTemplates extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  TextColumn get name => text()();
+
+  /// Sender header the template is limited to (e.g. `HDFCBK`), null = any.
+  TextColumn get senderPattern => text().nullable()();
+  TextColumn get specJson => text()();
+  TextColumn get sampleBody => text()();
+  TextColumn get sampleSender => text().nullable()();
+  BoolColumn get enabled => boolean().withDefault(const Constant(true))();
+
+  /// How many messages this template has read.
+  IntColumn get hits => integer().withDefault(const Constant(0))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+}
+
+/// "This received money (or part of it) settles that payment": splits with
+/// friends, refunds, reimbursements. [amountMinor] is the part of the credit
+/// that offsets the payment, in their shared currency.
+class TxnLinks extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  @ReferenceName('paymentLinks')
+  IntColumn get paymentId => integer().references(Transactions, #id, onDelete: KeyAction.cascade)();
+  @ReferenceName('receivedLinks')
+  IntColumn get receivedId => integer().references(Transactions, #id, onDelete: KeyAction.cascade)();
+  IntColumn get amountMinor => integer()();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+}
+
+/// A bill or subscription entered by hand, with a reminder.
+class Bills extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  TextColumn get name => text()();
+  IntColumn get amountMinor => integer().withDefault(const Constant(0))();
+  TextColumn get currency => text().withDefault(const Constant('INR'))();
+
+  /// `once`, `weekly`, `biweekly`, `monthly`, `quarterly`, `halfyearly`, `yearly`.
+  TextColumn get frequency => text().withDefault(const Constant('monthly'))();
+
+  /// The next date the bill is due (date only; time of day is ignored).
+  DateTimeColumn get nextDue => dateTime()();
+
+  /// Remind this many days before [nextDue] (0 = on the day). A reminder
+  /// is always also sent on the due date itself.
+  IntColumn get remindDaysBefore => integer().withDefault(const Constant(1))();
+  BoolColumn get isSubscription => boolean().withDefault(const Constant(false))();
+  IntColumn get categoryId => integer().nullable().references(Categories, #id, onDelete: KeyAction.setNull)();
+  IntColumn get accountId => integer().nullable().references(Accounts, #id, onDelete: KeyAction.setNull)();
+  TextColumn get note => text().nullable()();
+  BoolColumn get active => boolean().withDefault(const Constant(true))();
+  DateTimeColumn get lastPaidAt => dateTime().nullable()();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
 }

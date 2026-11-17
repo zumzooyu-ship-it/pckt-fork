@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:timezone/timezone.dart' as tz;
 
 /// Thin wrapper over flutter_local_notifications. Android only for now;
 /// every call is a safe no-op elsewhere (and in tests).
@@ -71,6 +72,44 @@ class LocalNotifications {
       );
     } catch (e) {
       debugPrint('Showing notification failed: $e');
+    }
+  }
+
+  static const _billChannel = AndroidNotificationDetails(
+    'bill_reminders',
+    'Bill & subscription reminders',
+    channelDescription: 'Before and on the due date of bills and subscriptions you added',
+    importance: Importance.high,
+    priority: Priority.high,
+    category: AndroidNotificationCategory.reminder,
+  );
+
+  /// Bill reminder ids live in this range so they can be told apart from
+  /// budget alerts when re-arming.
+  static const billIdBase = 7000000;
+
+  /// Replaces every scheduled bill reminder with [items]. Uses inexact
+  /// alarms (no special permission; may fire a few minutes late in Doze).
+  Future<void> rescheduleBills(List<({int id, String title, String body, DateTime at})> items) async {
+    if (!await _init()) return;
+    try {
+      final plugin = _plugin!;
+      for (final p in await plugin.pendingNotificationRequests()) {
+        if (p.id >= billIdBase) await plugin.cancel(id: p.id);
+      }
+      for (final i in items) {
+        await plugin.zonedSchedule(
+          id: i.id,
+          scheduledDate: tz.TZDateTime.from(i.at, tz.UTC),
+          notificationDetails: const NotificationDetails(android: _billChannel),
+          androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+          title: i.title,
+          body: i.body,
+          payload: 'bills',
+        );
+      }
+    } catch (e) {
+      debugPrint('Scheduling bill reminders failed: $e');
     }
   }
 }

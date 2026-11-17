@@ -9,6 +9,7 @@ import '../../core/theme/palette.dart';
 import '../../data/db/database.dart';
 import '../../providers.dart';
 import '../../ui/widgets.dart';
+import '../templates/templates_screen.dart';
 
 /// Shows how each SMS / email was handled — the main tool for spotting parser gaps.
 class MessagesScreen extends ConsumerStatefulWidget {
@@ -112,9 +113,22 @@ class _MessageCard extends StatelessWidget {
           style: context.text.bodySmall?.copyWith(height: 1.45),
         ),
         const SizedBox(height: 6),
-        Text(
-          dateTimeLabel(message.receivedAt),
-          style: context.text.labelSmall?.copyWith(color: context.colors.onSurfaceVariant),
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                dateTimeLabel(message.receivedAt),
+                style: context.text.labelSmall?.copyWith(color: context.colors.onSurfaceVariant),
+              ),
+            ),
+            if (message.parseStatus == ParseStatus.ignored || message.parseStatus == ParseStatus.pendingLlm)
+              if (message.ignoreReason != 'Deleted by user')
+                TextButton.icon(
+                  onPressed: () => openTemplateEditor(context, message: message),
+                  icon: const Icon(PhosphorIconsRegular.magicWand, size: 16),
+                  label: const Text('Teach Pckt'),
+                ),
+          ],
         ),
       ],
     ),

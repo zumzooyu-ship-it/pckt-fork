@@ -3,6 +3,7 @@ import 'package:drift/drift.dart';
 import '../../core/currency.dart';
 import '../seed/default_categories.dart';
 import 'db_encryption.dart';
+import 'extras.dart';
 import 'tables.dart';
 
 export 'tables.dart';
@@ -21,11 +22,21 @@ extension TxnMoney on Transaction {
   /// Amount in minor units of [home]: the amount itself for a [home]
   /// transaction, the recorded conversion for a foreign one, or null when
   /// there is none (it is then left out of totals rather than guessed).
-  int? amountIn(String home) => currency == home
-      ? amountMinor
-      : convertedCurrency == home
-      ? convertedMinor
-      : null;
+  ///
+  /// The part settled by linked payments/repayments ([linkedMinor]) is taken
+  /// off, so a ₹500 movie paid with a friend who sent back ₹250 counts ₹250
+  /// of spend, and a ₹250 repayment counts no income.
+  int? amountIn(String home) {
+    final gross = currency == home
+        ? amountMinor
+        : convertedCurrency == home
+        ? convertedMinor
+        : null;
+    if (gross == null) return null;
+    if (linkedMinor <= 0 || amountMinor <= 0) return gross;
+    final settled = currency == home ? linkedMinor : (linkedMinor * gross ~/ amountMinor);
+    return settled >= gross ? 0 : gross - settled;
+  }
 
   /// [amountIn] the current home currency.
   int? get homeMinor => amountIn(Currencies.home);
@@ -33,7 +44,9 @@ extension TxnMoney on Transaction {
   bool get isForeign => currency != Currencies.home;
 }
 
-@DriftDatabase(tables: [Accounts, Categories, Transactions, RawMessages, MerchantRules, Budgets])
+@DriftDatabase(
+  tables: [Accounts, Categories, Transactions, RawMessages, MerchantRules, Budgets, ParserTemplates, TxnLinks, Bills],
+)
 class AppDatabase extends _$AppDatabase {
   /// Without an [executor], opens the SQLCipher-encrypted `pckt.sqlite`
   /// (migrating a plaintext one first) — see [openAppDatabase].
@@ -43,7 +56,7 @@ class AppDatabase extends _$AppDatabase {
   static const protectedCategories = {'Transfers', 'Other'};
 
   @override
-  int get schemaVersion => 4;
+  int get schemaVersion => 5;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -75,6 +88,18 @@ class AppDatabase extends _$AppDatabase {
         await _addColumnIfMissing(m, transactions, transactions.convertedCurrency);
         await _addColumnIfMissing(m, accounts, accounts.currency);
         await _addColumnIfMissing(m, budgets, budgets.currency);
+      }
+      // v5: custom parser templates, transfers, repayment links, bills and
+      // account balances.
+      if (from < 5) {
+        await _addColumnIfMissing(m, transactions, transactions.linkedMinor);
+        await _addColumnIfMissing(m, transactions, transactions.transferPairId);
+        await _addColumnIfMissing(m, accounts, accounts.balanceMinor);
+        await _addColumnIfMissing(m, accounts, accounts.balanceAt);
+        await _addColumnIfMissing(m, accounts, accounts.balanceManual);
+        await m.createTable(parserTemplates);
+        await m.createTable(txnLinks);
+        await m.createTable(bills);
       }
     },
     beforeOpen: (details) async {
@@ -280,6 +305,17 @@ class AppDatabase extends _$AppDatabase {
   });
 
   Future<void> deleteTxn(int id) => transaction(() async {
+    // Other end of a transfer pair, and anything this was linked to.
+    await (update(transactions)..where((t) => t.transferPairId.equals(id))).write(
+      const TransactionsCompanion(transferPairId: Value(null)),
+    );
+    final linked = await (select(txnLinks)..where((l) => l.paymentId.equals(id) | l.receivedId.equals(id))).get();
+    await (delete(txnLinks)..where((l) => l.paymentId.equals(id) | l.receivedId.equals(id))).go();
+    for (final l in linked) {
+      for (final other in {l.paymentId, l.receivedId}.where((x) => x != id)) {
+        await recomputeLinked(other);
+      }
+    }
     await (update(rawMessages)..where((m) => m.transactionId.equals(id))).write(
       const RawMessagesCompanion(
         transactionId: Value(null),
@@ -363,6 +399,8 @@ class AppDatabase extends _$AppDatabase {
       'DELETE FROM transactions WHERE id NOT IN '
       '(SELECT transaction_id FROM raw_messages WHERE transaction_id IS NOT NULL)',
     );
+    // Links/pairs that pointed at removed rows.
+    await recomputeAllLinked();
   });
 
   // ------------------------------------------------------------- editing

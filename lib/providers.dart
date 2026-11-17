@@ -61,6 +61,9 @@ abstract final class PrefKeys {
   /// Set once the messages v1.0's parser skipped (foreign amounts, mostly)
   /// have been re-read with the current rules.
   static const skippedReparsed = 'sms.skippedReparsed';
+
+  /// Set once account balances have been read out of already-stored messages.
+  static const balancesBackfilled = 'sms.balancesBackfilled';
 }
 
 /// The home currency: totals, budgets and the assistant use it, and amounts
@@ -167,13 +170,35 @@ class SmsSyncController extends Notifier<SmsSyncState> {
       return false;
     }
     if (_prefs.getBool(PrefKeys.smsAlerts) ?? true) await sms.requestNotifications();
-    final from = DateTime(DateTime.now().year, DateTime.now().month - months, DateTime.now().day);
+    final from = _fromMonths(months);
     await _prefs.setBool(PrefKeys.smsEnabled, true);
     await _prefs.setInt(PrefKeys.smsImportFrom, from.millisecondsSinceEpoch);
     await _prefs.remove(PrefKeys.smsLastSync);
     state = state.copyWith(enabled: true);
     await sync();
     return true;
+  }
+
+  /// [months] ago; 0 means every message on the phone.
+  DateTime _fromMonths(int months) => months <= 0
+      ? DateTime.fromMillisecondsSinceEpoch(0)
+      : DateTime(DateTime.now().year, DateTime.now().month - months, DateTime.now().day);
+
+  /// Where the scan currently starts (null = all messages / not set).
+  DateTime? get scanFrom {
+    final v = _prefs.getInt(PrefKeys.smsImportFrom);
+    return v == null || v <= 0 ? null : DateTime.fromMillisecondsSinceEpoch(v);
+  }
+
+  /// Changes how far back messages are read and scans again — also after the
+  /// first connect. Nothing is deleted: messages already read are skipped, so
+  /// a longer range only adds older transactions.
+  Future<IngestReport?> rescan({required int months}) async {
+    if (!state.enabled) return null;
+    await _prefs.setInt(PrefKeys.smsImportFrom, _fromMonths(months).millisecondsSinceEpoch);
+    await _prefs.remove(PrefKeys.smsLastSync);
+    state = state.copyWith();
+    return sync();
   }
 
   Future<void> disconnect() async {
@@ -201,6 +226,11 @@ class SmsSyncController extends Notifier<SmsSyncState> {
       if (!(_prefs.getBool(PrefKeys.skippedReparsed) ?? false)) {
         await ref.read(ingestionProvider).reparseSkipped();
         await _prefs.setBool(PrefKeys.skippedReparsed, true);
+      }
+      // Read balances out of messages stored before balances existed.
+      if (!(_prefs.getBool(PrefKeys.balancesBackfilled) ?? false)) {
+        await ref.read(ingestionProvider).backfillBalances();
+        await _prefs.setBool(PrefKeys.balancesBackfilled, true);
       }
       final last = _prefs.getInt(PrefKeys.smsLastSync);
       final importFrom = _prefs.getInt(PrefKeys.smsImportFrom) ?? 0;

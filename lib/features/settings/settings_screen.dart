@@ -64,6 +64,13 @@ class SettingsScreen extends ConsumerWidget {
                     onChanged: (v) => ref.read(budgetAlertsProvider.notifier).setEnabled(v),
                   ),
                   ListTile(
+                    leading: const Icon(PhosphorIconsRegular.bellRinging),
+                    title: const Text('Bills & subscriptions'),
+                    subtitle: const Text('Add manually, get reminded before they are due'),
+                    trailing: const Icon(PhosphorIconsBold.caretRight, size: 16),
+                    onTap: () => context.push('/bills'),
+                  ),
+                  ListTile(
                     leading: const Icon(PhosphorIconsRegular.bank),
                     title: const Text('Accounts'),
                     subtitle: Text(
@@ -80,6 +87,13 @@ class SettingsScreen extends ConsumerWidget {
                     subtitle: const Text('Add, rename, reorder or delete'),
                     trailing: const Icon(PhosphorIconsBold.caretRight, size: 16),
                     onTap: () => context.push('/settings/categories'),
+                  ),
+                  ListTile(
+                    leading: const Icon(PhosphorIconsRegular.magicWand),
+                    title: const Text('Message templates'),
+                    subtitle: const Text('Teach Pckt a bank message it missed'),
+                    trailing: const Icon(PhosphorIconsBold.caretRight, size: 16),
+                    onTap: () => context.push('/templates'),
                   ),
                 ],
               ),
@@ -224,6 +238,15 @@ class _SmsCard extends ConsumerWidget {
               ],
             ),
           ],
+          if (supported && sync.enabled) ...[
+            const SizedBox(height: 12),
+            Text(
+              ctrl.scanFrom == null
+                  ? 'Reading all messages on this phone'
+                  : 'Reading messages since ${dayLabel(ctrl.scanFrom!)}',
+              style: context.text.bodySmall?.copyWith(color: context.colors.onSurfaceVariant),
+            ),
+          ],
           if (supported && sync.enabled) const SmsAlertsTile(),
           const SizedBox(height: 14),
           if (supported)
@@ -256,31 +279,80 @@ class _SmsCard extends ConsumerWidget {
                 ],
               ],
             ),
+          if (supported && sync.enabled) ...[
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: sync.running ? null : () => _pickRangeAndScan(context, ref),
+                    icon: const Icon(PhosphorIconsBold.calendarBlank, size: 18),
+                    label: const Text('Scan period'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => context.push('/templates'),
+                    icon: const Icon(PhosphorIconsRegular.magicWand, size: 18),
+                    label: const Text('Teach Pckt'),
+                  ),
+                ),
+              ],
+            ),
+          ],
         ],
       ),
     );
   }
 }
 
-Future<void> _pickRangeAndConnect(BuildContext context, WidgetRef ref) async {
-  final months = await showModalBottomSheet<int>(
-    context: context,
-    builder: (c) => SafeArea(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text('Import history from', style: c.text.titleMedium),
-          const SizedBox(height: 8),
-          for (final m in const [1, 3, 6, 12])
-            ListTile(
-              leading: const Icon(PhosphorIconsRegular.clockCounterClockwise),
-              title: Text(m == 1 ? 'Last month' : 'Last $m months'),
-              onTap: () => Navigator.pop(c, m),
+/// 0 = every message on the phone.
+Future<int?> _pickRange(BuildContext context, {required String title, int? current}) => showModalBottomSheet<int>(
+  context: context,
+  builder: (c) => SafeArea(
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: Text(title, style: c.text.titleMedium),
+        ),
+        const SizedBox(height: 8),
+        for (final m in const [1, 3, 6, 12, 24, 0])
+          ListTile(
+            leading: const Icon(PhosphorIconsRegular.clockCounterClockwise),
+            title: Text(
+              m == 0
+                  ? 'All messages'
+                  : m == 1
+                  ? 'Last month'
+                  : m == 12
+                  ? 'Last year'
+                  : m == 24
+                  ? 'Last 2 years'
+                  : 'Last $m months',
             ),
-          const SizedBox(height: 8),
-        ],
-      ),
+            trailing: current == m ? const Icon(PhosphorIconsBold.check) : null,
+            onTap: () => Navigator.pop(c, m),
+          ),
+        const SizedBox(height: 8),
+      ],
     ),
-  );
+  ),
+);
+
+Future<void> _pickRangeAndConnect(BuildContext context, WidgetRef ref) async {
+  final months = await _pickRange(context, title: 'Import history from');
   if (months != null) await ref.read(smsSyncProvider.notifier).connect(months: months);
+}
+
+/// Change the scan period after the first connect, then scan again.
+Future<void> _pickRangeAndScan(BuildContext context, WidgetRef ref) async {
+  final months = await _pickRange(context, title: 'Scan messages from');
+  if (months == null) return;
+  final report = await ref.read(smsSyncProvider.notifier).rescan(months: months);
+  if (context.mounted && report != null) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Scanned · $report')));
+  }
 }

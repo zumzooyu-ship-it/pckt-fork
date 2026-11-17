@@ -12,6 +12,8 @@ import 'category_picker.dart';
 import 'conversion_sheet.dart';
 import '../settings/manage_widgets.dart' show accountLabel;
 import 'edit_transaction_sheet.dart';
+import '../../data/db/extras.dart';
+import 'link_sheet.dart';
 
 Future<void> showTransactionSheet(BuildContext context, int id) => showModalBottomSheet(
   context: context,
@@ -62,6 +64,15 @@ class TransactionSheet extends ConsumerWidget {
             child: Text(
               '≈ ${money(t.convertedMinor!, currency: t.convertedCurrency, forceDecimals: true)}',
               style: context.text.titleSmall?.copyWith(color: context.colors.onSurfaceVariant),
+            ),
+          ),
+        if (t.linkedMinor > 0 && !t.isTransfer)
+          Center(
+            child: Text(
+              credit
+                  ? '${money(t.linkedMinor, currency: t.currency)} of this is a repayment'
+                  : 'Your share ${money(t.amountMinor - t.linkedMinor, currency: t.currency)}',
+              style: context.text.titleSmall?.copyWith(color: Palette.mint, fontWeight: FontWeight.w700),
             ),
           ),
         const SizedBox(height: 4),
@@ -181,11 +192,15 @@ class TransactionSheet extends ConsumerWidget {
         SwitchListTile(
           contentPadding: const EdgeInsets.symmetric(horizontal: 4),
           value: t.isTransfer,
-          onChanged: (v) => db.setTransfer(id, v),
+          onChanged: (v) async {
+            if (!v) await db.unpairTransfer(id);
+            await db.setTransfer(id, v);
+          },
           title: const Text('Transfer between my accounts'),
           subtitle: const Text('Excluded from spending and income'),
           secondary: const Icon(PhosphorIconsRegular.arrowsLeftRight),
         ),
+        if (t.isTransfer) TransferPanel(txn: t) else LinksPanel(txn: t),
         const SizedBox(height: 12),
         SectionHeader('Sources (${sources.length})'),
         for (final s in sources) _SourceCard(message: s),
