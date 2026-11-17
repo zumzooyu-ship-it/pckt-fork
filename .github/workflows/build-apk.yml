@@ -1,25 +1,288 @@
-name: Build APK
+name: Build Pckt APK
+
+# Fixed build for pritam-ravani/pckt (and forks of it).
+#
+# WHY THE OLD RUNS FAILED
+#   "channel: stable" silently moved to Flutter 3.50 on 2026-11-11. Flutter 3.50 refuses
+#   to build projects below AGP 9.1.1 / Kotlin 2.4.10, and Pckt uses AGP 9.1.0 / Kotlin 2.4.0:
+#     "Your project's Android Gradle Plugin version (9.1.0) is lower than Flutter's
+#      minimum supported version of 9.1.1"
+#   Pckt targets Flutter 3.47 (pubspec.lock: flutter >=3.47.0), so this workflow PINS 3.47.9.
+#
+# WHAT IT DOES
+#   1. Pins Flutter + JDK + runner image so a new Flutter release can never break it again
+#   2. Applies the start-up fixes idempotently (safe if your fork already has them)
+#   3. Signs every build with the SAME key (so you can update the app without uninstalling)
+#   4. Builds the APK, uploads it as an artifact and publishes it on the Releases page
+#   5. If the build fails, writes the real error into the run summary + uploads build.log
+
 on:
   workflow_dispatch:
+    inputs:
+      flutter_version:
+        description: "Flutter version (3.47.9 = tested)"
+        required: true
+        default: "3.47.9"
+      target_platform:
+        description: "CPU type"
+        required: true
+        type: choice
+        default: android-arm64
+        options:
+          - android-arm64
+          - android-arm,android-arm64,android-x64
   push:
     branches: [main, master]
+    paths-ignore:
+      - "**.md"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: ${{ inputs.flutter_version || '3.47.9' }}
+  TARGET_PLATFORM: ${{ inputs.target_platform || 'android-arm64' }}
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Build APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21 (runs Gradle; app is still compiled for Java 17)
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
-      - uses: subosito/flutter-action@v2
+          java-version: "21"
+
+      - name: Set up Flutter ${{ env.FLUTTER_VERSION }}
+        uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
-      - run: flutter --version
-      - run: flutter pub get
-      - run: flutter build apk --release
-      - uses: actions/upload-artifact@v4
+
+      - name: Show toolchain
+        run: |
+          flutter --version
+          java -version
+          grep -n "version \"" android/settings.gradle.kts || true
+          grep -n "distributionUrl" android/gradle/wrapper/gradle-wrapper.properties || true
+
+      - name: Accept Android SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+
+      - name: Give Gradle enough memory
+        run: |
+          mkdir -p ~/.gradle
+          cat >> ~/.gradle/gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -XX:+HeapDumpOnOutOfMemoryError
+          org.gradle.daemon=false
+          kotlin.daemon.jvmargs=-Xmx2g
+          EOF
+
+      - name: Apply Pckt start-up fixes (safe to run more than once)
+        run: |
+          python3 - <<'PY'
+          import re, pathlib, sys
+
+          def read(p):  return pathlib.Path(p).read_text(encoding="utf-8")
+          def write(p, s): pathlib.Path(p).write_text(s, encoding="utf-8")
+
+          # 1) lib/main.dart: show the UI first, start the optional on-device AI in the background
+          p = "lib/main.dart"
+          s = read(p)
+          if "unawaited(_initOnDeviceAi()" in s:
+              print("main.dart: already patched")
+          else:
+              # undo the old "guarded" variant from earlier attempts, if present
+              s = re.sub(r"^[ \t]*if \(prefs\.getBool\('__enable_litert_boot_probe__'\) == true\) \{ await _initOnDeviceAi\(\); \}\n", "", s, flags=re.M)
+              s = re.sub(r"^[ \t]*await _initOnDeviceAi\(\);\n", "", s, count=1, flags=re.M)
+              if "import 'dart:async';" not in s:
+                  s = "import 'dart:async';\n" + s
+              m = re.search(r"^[ \t]*runApp\(.*\);\n", s, flags=re.M)
+              if not m:
+                  sys.exit("main.dart: could not find runApp(...) - upstream changed, patch needs updating")
+              boot = (
+                  "  // Show the UI first. The on-device AI engine is optional, so it starts in the\n"
+                  "  // background and can never block (or crash) app start-up.\n"
+              )
+              call = (
+                  "  unawaited(_initOnDeviceAi().timeout(const Duration(seconds: 20), onTimeout: () {\n"
+                  "    debugPrint('On-device AI init timed out; continuing without it');\n"
+                  "  }).catchError((Object e) {\n"
+                  "    debugPrint('On-device AI init failed: $e');\n"
+                  "  }));\n"
+              )
+              s = s[:m.start()] + boot + m.group(0) + call + s[m.end():]
+              write(p, s)
+              print("main.dart: patched")
+
+          # 2) AndroidManifest.xml: use the Skia renderer (Impeller shows a blank screen on some phones)
+          p = "android/app/src/main/AndroidManifest.xml"
+          s = read(p)
+          if "EnableImpeller" in s:
+              print("manifest: already patched")
+          else:
+              s, n = re.subn(r"(<application\b[^>]*>)",
+                  r'\1\n        <meta-data android:name="io.flutter.embedding.android.EnableImpeller" android:value="false" />',
+                  s, count=1)
+              if n != 1:
+                  sys.exit("manifest: <application> tag not found")
+              write(p, s)
+              print("manifest: patched")
+
+          # 3) android/app/build.gradle.kts: R8 minify/shrink off (can strip classes the AI plugins need)
+          p = "android/app/build.gradle.kts"
+          s = read(p)
+          s2 = s.replace("isMinifyEnabled = true", "isMinifyEnabled = false").replace("isShrinkResources = true", "isShrinkResources = false")
+          write(p, s2)
+          print("build.gradle.kts:", "patched" if s != s2 else "already patched")
+          PY
+
+      - name: Raise Android build tools if Flutter is 3.50 or newer
+        run: |
+          # Flutter >= 3.50 enforces AGP >= 9.1.1 and Kotlin Gradle plugin >= 2.4.10.
+          # Not needed for the pinned 3.47.9, but keeps the workflow working if you change the version.
+          if [ "$(printf '%s\n3.50.0\n' "${FLUTTER_VERSION%%-*}" | sort -V | head -n1)" = "3.50.0" ]; then
+            echo "Flutter $FLUTTER_VERSION >= 3.50 -> raising AGP/Kotlin"
+            sed -i -E 's/(com\.android\.application"\) version ")[0-9.]+(")/\19.1.1\2/' android/settings.gradle.kts
+            sed -i -E 's/(org\.jetbrains\.kotlin\.android"\) version ")[0-9.]+(")/\12.4.10\2/' android/settings.gradle.kts
+            grep -n "version \"" android/settings.gradle.kts
+          else
+            echo "Flutter $FLUTTER_VERSION < 3.50 -> build tools left as they are"
+          fi
+
+      - name: Restore signing key (keeps the same signature on every build)
+        uses: actions/cache@v4
+        with:
+          path: ~/pckt-signing
+          key: pckt-signing-key-v1
+
+      - name: Prepare release signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
+        run: |
+          mkdir -p ~/pckt-signing
+          KS="$HOME/pckt-signing/pckt.jks"
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASSWORD" ]; then
+            echo "Using your keystore from repository secrets"
+            echo "$KEYSTORE_BASE64" | base64 -d > "$KS"
+            PASS="$KEYSTORE_PASSWORD"
+            ALIAS="${KEYSTORE_ALIAS:-pckt}"
+          else
+            PASS="pckt-sideload-key"
+            ALIAS="pckt"
+            if [ -f "$KS" ]; then
+              echo "Re-using cached signing key"
+            else
+              echo "Creating a new signing key (cached for next builds)"
+              keytool -genkeypair -keystore "$KS" -storetype PKCS12 -alias "$ALIAS" \
+                -keyalg RSA -keysize 2048 -validity 36500 \
+                -storepass "$PASS" -keypass "$PASS" \
+                -dname "CN=Pckt Sideload, OU=Dev, O=Pckt, C=IN"
+            fi
+          fi
+          cat > android/key.properties <<EOF
+          storePassword=$PASS
+          keyPassword=$PASS
+          keyAlias=$ALIAS
+          storeFile=$KS
+          EOF
+          echo "android/key.properties written (git-ignored)"
+
+      - name: Get packages
+        run: |
+          flutter pub get
+          # database.g.dart is committed upstream; only generate it if it is missing
+          if [ ! -f lib/data/db/database.g.dart ]; then
+            echo "database.g.dart missing -> running build_runner"
+            dart run build_runner build --delete-conflicting-outputs
+          fi
+
+      - name: Build APK (${{ env.TARGET_PLATFORM }})
+        run: |
+          set -o pipefail
+          : > build.log
+          for attempt in 1 2; do
+            echo "=== build attempt $attempt ===" | tee -a build.log
+            if flutter build apk --release --target-platform "$TARGET_PLATFORM" --no-tree-shake-icons 2>&1 | tee -a build.log; then
+              exit 0
+            fi
+            [ "$attempt" = "2" ] && exit 1
+            echo "Build failed - retrying once (network hiccups are common)..."
+            sleep 20
+          done
+
+      - name: Collect APK
+        run: |
+          VER="$(grep -m1 '^version:' pubspec.yaml | sed -E 's/version:[[:space:]]*//; s/\+.*//')"
+          mkdir -p dist
+          SRC=build/app/outputs/flutter-apk/app-release.apk
+          test -f "$SRC" || { echo "::error::APK not found at $SRC"; ls -R build/app/outputs || true; exit 1; }
+          case "$TARGET_PLATFORM" in
+            android-arm64) SUFFIX=arm64 ;;
+            *) SUFFIX=universal ;;
+          esac
+          OUT="dist/pckt-v${VER}-patched-${SUFFIX}.apk"
+          cp "$SRC" "$OUT"
+          ls -lh dist
+          APKSIGNER="$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n1)"
+          "$APKSIGNER" verify --print-certs "$OUT" | head -n 5 || true
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
         with:
           name: pckt-patched-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: dist/*.apk
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Publish APK on the Releases page
+        uses: softprops/action-gh-release@v2
+        continue-on-error: true
+        with:
+          tag_name: patched-build-${{ github.run_number }}
+          name: Pckt patched build #${{ github.run_number }}
+          body: |
+            Patched Pckt build (Flutter ${{ env.FLUTTER_VERSION }}, ${{ env.TARGET_PLATFORM }}).
+            Open **Assets** below and tap the `.apk` file to download it.
+          files: dist/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Explain the failure (only runs if something above failed)
+        if: failure()
+        run: |
+          {
+            echo "## Build failed"
+            echo
+            echo "Flutter: \`$FLUTTER_VERSION\`  |  Target: \`$TARGET_PLATFORM\`"
+            echo
+            echo "### Key lines from the log"
+            echo '```'
+            if [ -f build.log ]; then
+              grep -n -E "What went wrong|FAILURE:|Error:|error:|e: file|Execution failed|Could not|lower than Flutter" -A4 build.log | head -n 80
+            else
+              echo "build.log not created - the failure happened before the build step"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload build log (only on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
